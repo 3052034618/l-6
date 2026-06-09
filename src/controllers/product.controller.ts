@@ -10,6 +10,7 @@ import {
   unauthorized,
 } from '../utils/response';
 import { ProductStatus, UserRole, UpdateFrequency } from '../types/enums';
+import { buildProductVisibilityWhere, isProductVisible, parseVisibleTo } from '../utils/visibility';
 
 export async function getProducts(req: Request, res: Response): Promise<void> {
   try {
@@ -25,17 +26,24 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
     const minPrice = req.query.minPrice as string;
     const maxPrice = req.query.maxPrice as string;
 
+    const visibilityWhere = buildProductVisibilityWhere(req.user);
     const where: any = {
-      status: ProductStatus.APPROVED,
-      isPublic: true,
+      ...visibilityWhere,
     };
 
     if (keyword) {
-      where.OR = [
-        { title: { contains: keyword } },
-        { description: { contains: keyword } },
-        { tags: { has: keyword } },
-      ];
+      const keywordCondition = {
+        OR: [
+          { title: { contains: keyword } },
+          { description: { contains: keyword } },
+          { tags: { contains: keyword } },
+        ],
+      };
+      if (where.OR) {
+        where.AND = [keywordCondition];
+      } else {
+        where.OR = keywordCondition.OR;
+      }
     }
 
     if (category) where.category = category;
@@ -114,11 +122,15 @@ export async function getProductDetail(req: Request, res: Response): Promise<voi
       return;
     }
 
-    if (product.status !== ProductStatus.APPROVED) {
-      if (!req.user || (req.user.role !== UserRole.ADMIN && req.user.userId !== product.providerId)) {
-        notFound(res, '产品不存在');
-        return;
-      }
+    if (!isProductVisible({
+      user: req.user,
+      status: product.status,
+      isPublic: product.isPublic,
+      visibleTo: product.visibleTo,
+      providerId: product.providerId,
+    })) {
+      notFound(res, '产品不存在');
+      return;
     }
 
     await prisma.dataProduct.update({
@@ -155,6 +167,8 @@ export async function getProductSample(req: Request, res: Response): Promise<voi
         dataFormat: true,
         status: true,
         isPublic: true,
+        visibleTo: true,
+        providerId: true,
       },
     });
 
@@ -163,11 +177,15 @@ export async function getProductSample(req: Request, res: Response): Promise<voi
       return;
     }
 
-    if (product.status !== ProductStatus.APPROVED) {
-      if (!req.user || req.user.role !== UserRole.ADMIN) {
-        notFound(res, '产品不存在');
-        return;
-      }
+    if (!isProductVisible({
+      user: req.user,
+      status: product.status,
+      isPublic: product.isPublic,
+      visibleTo: product.visibleTo,
+      providerId: product.providerId,
+    })) {
+      notFound(res, '产品不存在');
+      return;
     }
 
     success(res, {

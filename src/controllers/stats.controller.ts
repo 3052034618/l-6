@@ -426,3 +426,162 @@ export async function getRecentActivities(req: Request, res: Response): Promise<
     error(res, err.message || '获取最近活动失败');
   }
 }
+
+export async function getTransactionProgress(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以查看交易进度');
+      return;
+    }
+
+    const industry = req.query.industry as string;
+    const region = req.query.region as string;
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    const days = parseInt(req.query.days as string) || 30;
+
+    const productWhere: any = {};
+    if (industry) productWhere.industry = industry;
+    if (region) productWhere.region = region;
+
+    const dateFilter: any = {};
+    if (startDate) dateFilter.gte = new Date(startDate);
+    if (endDate) dateFilter.lte = new Date(endDate);
+
+    const products = await prisma.dataProduct.findMany({
+      where: productWhere,
+      select: { id: true },
+    });
+    const productIds = products.map((p) => p.id);
+
+    const authWhere: any = {};
+    if (productIds.length > 0) authWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) authWhere.createdAt = dateFilter;
+
+    const contractWhere: any = {};
+    if (productIds.length > 0) contractWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) contractWhere.createdAt = dateFilter;
+
+    const deliveryWhere: any = {};
+    if (productIds.length > 0) deliveryWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) deliveryWhere.createdAt = dateFilter;
+
+    const [
+      totalAuthRequests,
+      pendingAuthRequests,
+      approvedAuthRequests,
+      rejectedAuthRequests,
+      totalContracts,
+      signedContracts,
+      executingContracts,
+      completedContracts,
+      totalDeliveries,
+      pendingDeliveries,
+      inProgressDeliveries,
+      deliveredDeliveries,
+      confirmedDeliveries,
+    ] = await Promise.all([
+      prisma.authorizationRequest.count({ where: authWhere }),
+      prisma.authorizationRequest.count({ where: { ...authWhere, status: AuthorizationStatus.PENDING } }),
+      prisma.authorizationRequest.count({ where: { ...authWhere, status: AuthorizationStatus.APPROVED } }),
+      prisma.authorizationRequest.count({ where: { ...authWhere, status: AuthorizationStatus.REJECTED } }),
+      prisma.contract.count({ where: contractWhere }),
+      prisma.contract.count({ where: { ...contractWhere, status: ContractStatus.SIGNED } }),
+      prisma.contract.count({ where: { ...contractWhere, status: ContractStatus.EXECUTING } }),
+      prisma.contract.count({ where: { ...contractWhere, status: ContractStatus.COMPLETED } }),
+      prisma.deliveryRecord.count({ where: deliveryWhere }),
+      prisma.deliveryRecord.count({ where: { ...deliveryWhere, status: DeliveryStatus.PENDING } }),
+      prisma.deliveryRecord.count({ where: { ...deliveryWhere, status: DeliveryStatus.IN_PROGRESS } }),
+      prisma.deliveryRecord.count({ where: { ...deliveryWhere, status: DeliveryStatus.DELIVERED } }),
+      prisma.deliveryRecord.count({ where: { ...deliveryWhere, status: DeliveryStatus.CONFIRMED } }),
+    ]);
+
+    const authToContractRate = totalAuthRequests > 0 ? (approvedAuthRequests / totalAuthRequests * 100).toFixed(1) : '0';
+    const contractToDeliveryRate = totalContracts > 0 ? (totalDeliveries / totalContracts * 100).toFixed(1) : '0';
+    const deliveryConfirmRate = totalDeliveries > 0 ? (confirmedDeliveries / totalDeliveries * 100).toFixed(1) : '0';
+    const overallConversion = totalAuthRequests > 0 ? (confirmedDeliveries / totalAuthRequests * 100).toFixed(1) : '0';
+
+    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate ? new Date(startDate) : (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - days);
+      return d;
+    })();
+
+    const dailyData = [];
+    const currentDate = new Date(start);
+    while (currentDate <= end) {
+      const dayStart = new Date(currentDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(currentDate);
+      dayEnd.setHours(23, 59, 59, 999);
+
+      const dayAuthWhere = { ...authWhere, createdAt: { gte: dayStart, lte: dayEnd } };
+      const dayContractWhere = { ...contractWhere, createdAt: { gte: dayStart, lte: dayEnd } };
+      const dayDeliveryWhere = { ...deliveryWhere, createdAt: { gte: dayStart, lte: dayEnd } };
+      const dayConfirmWhere = { ...deliveryWhere, confirmedAt: { gte: dayStart, lte: dayEnd } };
+
+      const [dayAuth, dayContract, dayDelivery, dayConfirm] = await Promise.all([
+        prisma.authorizationRequest.count({ where: dayAuthWhere }),
+        prisma.contract.count({ where: dayContractWhere }),
+        prisma.deliveryRecord.count({ where: dayDeliveryWhere }),
+        prisma.deliveryRecord.count({ where: { ...dayConfirmWhere, status: DeliveryStatus.CONFIRMED } }),
+      ]);
+
+      dailyData.push({
+        date: currentDate.toISOString().split('T')[0],
+        authRequests: dayAuth,
+        contracts: dayContract,
+        deliveries: dayDelivery,
+        confirmations: dayConfirm,
+      });
+
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    success(res, {
+      summary: {
+        authRequests: {
+          total: totalAuthRequests,
+          pending: pendingAuthRequests,
+          approved: approvedAuthRequests,
+          rejected: rejectedAuthRequests,
+        },
+        contracts: {
+          total: totalContracts,
+          signed: signedContracts,
+          executing: executingContracts,
+          completed: completedContracts,
+        },
+        deliveries: {
+          total: totalDeliveries,
+          pending: pendingDeliveries,
+          inProgress: inProgressDeliveries,
+          delivered: deliveredDeliveries,
+          confirmed: confirmedDeliveries,
+        },
+      },
+      conversionRates: {
+        authToContract: authToContractRate + '%',
+        contractToDelivery: contractToDeliveryRate + '%',
+        deliveryConfirm: deliveryConfirmRate + '%',
+        overallConversion: overallConversion + '%',
+      },
+      stages: [
+        { stage: 'authRequest', name: '授权申请', count: totalAuthRequests, status: 'completed' },
+        { stage: 'contract', name: '签订合同', count: totalContracts, status: 'in-progress' },
+        { stage: 'delivery', name: '交付数据', count: totalDeliveries, status: 'pending' },
+        { stage: 'confirmation', name: '确认收货', count: confirmedDeliveries, status: 'pending' },
+      ],
+      dailyData,
+      filters: {
+        industry: industry || null,
+        region: region || null,
+        startDate: start.toISOString().split('T')[0],
+        endDate: end.toISOString().split('T')[0],
+      },
+    });
+  } catch (err: any) {
+    error(res, err.message || '获取交易进度失败');
+  }
+}

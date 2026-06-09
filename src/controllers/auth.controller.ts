@@ -37,6 +37,7 @@ export async function login(req: Request, res: Response): Promise<void> {
       userId: user.id,
       username: user.username,
       role: user.role as UserRole,
+      organization: user.organization,
     });
 
     success(res, {
@@ -105,6 +106,7 @@ export async function register(req: Request, res: Response): Promise<void> {
       userId: user.id,
       username: user.username,
       role: user.role as UserRole,
+      organization: user.organization,
     });
 
     success(res, {

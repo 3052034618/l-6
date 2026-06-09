@@ -227,23 +227,58 @@ export async function confirmDelivery(req: Request, res: Response): Promise<void
       return;
     }
 
-    if (delivery.status !== DeliveryStatus.DELIVERED && delivery.status !== DeliveryStatus.IN_PROGRESS) {
-      badRequest(res, '当前状态不允许确认');
+    if (delivery.status !== DeliveryStatus.DELIVERED) {
+      badRequest(res, '只有已交付状态的记录才能确认收货');
       return;
     }
 
     const proofHash = generateProofHash(delivery.id, delivery.batchNo, Date.now());
-    const auditTrail = generateAuditTrail(delivery, req.user.userId);
+    const confirmedAt = new Date();
     const userId = req.user.userId;
+    const userOrg = req.user.organization || '';
+
+    const proofContent = {
+      deliveryId: delivery.id,
+      batchNo: delivery.batchNo,
+      status: 'CONFIRMED',
+      product: {
+        id: delivery.productId,
+        title: delivery.product.title,
+        category: delivery.product.category,
+        industry: delivery.product.industry,
+        region: delivery.product.region,
+      },
+      contract: {
+        id: delivery.contractId,
+        contractNo: delivery.contract?.contractNo,
+        price: delivery.contract?.price,
+        startDate: delivery.contract?.startDate,
+        endDate: delivery.contract?.endDate,
+      },
+      consumer: {
+        id: delivery.consumerId,
+        confirmedBy: userId,
+        organization: userOrg,
+      },
+      confirmedAt: confirmedAt.toISOString(),
+      dataSize: delivery.dataSize,
+    };
+
+    const auditTrail = JSON.stringify([
+      { action: 'DELIVERY_CREATED', timestamp: delivery.createdAt.toISOString(), actor: 'PROVIDER', status: 'PENDING' },
+      { action: 'DELIVERY_IN_PROGRESS', timestamp: delivery.createdAt.toISOString(), actor: 'PROVIDER', status: 'IN_PROGRESS' },
+      { action: 'DELIVERY_DELIVERED', timestamp: delivery.deliveredAt?.toISOString() || '', actor: 'PROVIDER', status: 'DELIVERED' },
+      { action: 'DELIVERY_CONFIRMED', timestamp: confirmedAt.toISOString(), actor: 'CONSUMER', status: 'CONFIRMED' },
+    ]);
 
     const updatedDelivery = await prisma.$transaction(async (tx) => {
       const updated = await tx.deliveryRecord.update({
         where: { id },
         data: {
           status: DeliveryStatus.CONFIRMED,
-          confirmedAt: new Date(),
+          confirmedAt,
           proofHash,
-          proofData: auditTrail,
+          proofData: JSON.stringify(proofContent),
         },
       });
 
@@ -252,15 +287,10 @@ export async function confirmDelivery(req: Request, res: Response): Promise<void
           deliveryId: id,
           proofType: 'CONSUMPTION_CONFIRMATION',
           proofHash,
-          proofContent: JSON.stringify({
-            deliveryId: delivery.id,
-            batchNo: delivery.batchNo,
-            confirmedBy: userId,
-            confirmedAt: new Date().toISOString(),
-          }),
-          timestamp: new Date(),
+          proofContent: JSON.stringify(proofContent),
+          timestamp: confirmedAt,
           auditor: userId,
-          auditTrail,
+          auditTrail: auditTrail,
         },
       });
 
@@ -331,7 +361,9 @@ export async function getDeliveryProof(req: Request, res: Response): Promise<voi
     const delivery = await prisma.deliveryRecord.findUnique({
       where: { id },
       include: {
-        product: { select: { providerId: true } },
+        product: { select: { providerId: true, title: true, category: true, industry: true, region: true } },
+        contract: { select: { contractNo: true, price: true, startDate: true, endDate: true } },
+        consumer: { select: { fullName: true, organization: true } },
         proof: true,
       },
     });
@@ -350,12 +382,56 @@ export async function getDeliveryProof(req: Request, res: Response): Promise<voi
       return;
     }
 
-    if (!delivery.proof) {
-      notFound(res, '暂无交付凭证');
+    if (!delivery.proof || delivery.status !== DeliveryStatus.CONFIRMED) {
+      notFound(res, '暂无交付凭证，请先确认收货');
       return;
     }
 
-    success(res, delivery.proof);
+    let proofContent: any = {};
+    let auditTrail: any[] = [];
+    try {
+      proofContent = JSON.parse(delivery.proof.proofContent);
+    } catch {}
+    try {
+      auditTrail = JSON.parse(delivery.proof.auditTrail);
+    } catch {}
+
+    success(res, {
+      id: delivery.proof.id,
+      proofType: delivery.proof.proofType,
+      proofHash: delivery.proof.proofHash,
+      timestamp: delivery.proof.timestamp,
+      auditor: delivery.proof.auditor,
+      auditTrail,
+      proofContent,
+      delivery: {
+        id: delivery.id,
+        batchNo: delivery.batchNo,
+        status: delivery.status,
+        dataSize: delivery.dataSize,
+        deliveredAt: delivery.deliveredAt,
+        confirmedAt: delivery.confirmedAt,
+        product: {
+          id: delivery.productId,
+          title: delivery.product.title,
+          category: delivery.product.category,
+          industry: delivery.product.industry,
+          region: delivery.product.region,
+        },
+        contract: {
+          id: delivery.contractId,
+          contractNo: delivery.contract?.contractNo,
+          price: delivery.contract?.price,
+          startDate: delivery.contract?.startDate,
+          endDate: delivery.contract?.endDate,
+        },
+        consumer: {
+          id: delivery.consumerId,
+          fullName: delivery.consumer.fullName,
+          organization: delivery.consumer.organization,
+        },
+      },
+    });
   } catch (err: any) {
     error(res, err.message || '获取交付凭证失败');
   }
