@@ -5,6 +5,7 @@ import { UserRole } from '../types/enums';
 export interface JwtPayload {
   userId: string;
   username: string;
+  fullName?: string | null;
   role: UserRole;
   organization?: string | null;
 }
