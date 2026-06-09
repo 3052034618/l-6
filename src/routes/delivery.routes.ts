@@ -5,6 +5,7 @@ import {
   getDeliveryDetail,
   confirmDelivery,
   markDelivered,
+  markDeliveryFailed,
   getDeliveryProof,
   verifyDeliveryProof,
 } from '../controllers/delivery.controller';
@@ -18,6 +19,7 @@ router.get('/:id', authMiddleware, getDeliveryDetail);
 router.get('/:id/proof', authMiddleware, getDeliveryProof);
 router.post('/', authMiddleware, requireProvider, createDelivery);
 router.post('/:id/deliver', authMiddleware, requireProvider, markDelivered);
+router.post('/:id/fail', authMiddleware, requireProvider, markDeliveryFailed);
 router.post('/:id/confirm', authMiddleware, confirmDelivery);
 
 export default router;

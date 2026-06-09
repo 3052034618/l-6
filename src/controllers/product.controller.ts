@@ -731,3 +731,67 @@ export async function getProductAuditLogs(req: Request, res: Response): Promise<
     error(res, err.message || '获取审核记录失败');
   }
 }
+
+export async function batchSetVisibility(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以配置可见范围');
+      return;
+    }
+
+    const { productIds, isPublic, visibleTo, mode } = req.body;
+
+    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
+      badRequest(res, '产品ID列表不能为空');
+      return;
+    }
+
+    if (mode !== 'public' && mode !== 'targeted' && mode !== 'default' && mode !== 'custom') {
+      badRequest(res, '模式参数不正确：public/targeted/default/custom');
+      return;
+    }
+
+    const products = await prisma.dataProduct.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, title: true, isPublic: true, visibleTo: true },
+    });
+
+    if (products.length === 0) {
+      notFound(res, '未找到匹配的产品');
+      return;
+    }
+
+    let updateData: any = {};
+    if (mode === 'public') {
+      updateData = { isPublic: true, visibleTo: '[]' };
+    } else if (mode === 'targeted') {
+      if (!visibleTo || !Array.isArray(visibleTo) || visibleTo.length === 0) {
+        badRequest(res, '定向可见模式需要指定可见机构列表');
+        return;
+      }
+      updateData = { isPublic: false, visibleTo: JSON.stringify(visibleTo) };
+    } else if (mode === 'default') {
+      updateData = { isPublic: true, visibleTo: '[]' };
+    } else if (mode === 'custom') {
+      updateData = {
+        isPublic: isPublic !== undefined ? isPublic : undefined,
+        visibleTo: visibleTo !== undefined ? JSON.stringify(visibleTo) : undefined,
+      };
+    }
+
+    const result = await prisma.dataProduct.updateMany({
+      where: { id: { in: productIds } },
+      data: updateData,
+    });
+
+    success(res, {
+      updatedCount: result.count,
+      productIds: productIds,
+      mode,
+      isPublic: updateData.isPublic,
+      visibleTo: updateData.visibleTo ? JSON.parse(updateData.visibleTo) : undefined,
+    }, '批量配置可见范围成功');
+  } catch (err: any) {
+    error(res, err.message || '批量配置可见范围失败');
+  }
+}

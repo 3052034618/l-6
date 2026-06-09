@@ -5,6 +5,7 @@ import {
   error,
   forbidden,
   unauthorized,
+  badRequest,
 } from '../utils/response';
 import {
   ProductStatus,
@@ -454,6 +455,55 @@ export async function getTransactionProgress(req: Request, res: Response): Promi
     });
     const productIds = products.map((p) => p.id);
 
+    const hasProductFilter = industry || region;
+    if (hasProductFilter && productIds.length === 0) {
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate ? new Date(startDate) : (() => {
+        const d = new Date();
+        d.setDate(d.getDate() - days);
+        return d;
+      })();
+      const dailyData = [];
+      const currentDate = new Date(start);
+      while (currentDate <= end) {
+        dailyData.push({
+          date: currentDate.toISOString().split('T')[0],
+          authRequests: 0,
+          contracts: 0,
+          deliveries: 0,
+          confirmations: 0,
+        });
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+      success(res, {
+        summary: {
+          authRequests: { total: 0, pending: 0, approved: 0, rejected: 0 },
+          contracts: { total: 0, signed: 0, executing: 0, completed: 0 },
+          deliveries: { total: 0, pending: 0, inProgress: 0, delivered: 0, confirmed: 0 },
+        },
+        conversionRates: {
+          authToContract: '0%',
+          contractToDelivery: '0%',
+          deliveryConfirm: '0%',
+          overallConversion: '0%',
+        },
+        stages: [
+          { stage: 'authRequest', name: '授权申请', count: 0, status: 'completed' },
+          { stage: 'contract', name: '签订合同', count: 0, status: 'in-progress' },
+          { stage: 'delivery', name: '交付数据', count: 0, status: 'pending' },
+          { stage: 'confirmation', name: '确认收货', count: 0, status: 'pending' },
+        ],
+        dailyData,
+        filters: {
+          industry: industry || null,
+          region: region || null,
+          startDate: start.toISOString().split('T')[0],
+          endDate: end.toISOString().split('T')[0],
+        },
+      });
+      return;
+    }
+
     const authWhere: any = {};
     if (productIds.length > 0) authWhere.productId = { in: productIds };
     if (Object.keys(dateFilter).length > 0) authWhere.createdAt = dateFilter;
@@ -583,5 +633,332 @@ export async function getTransactionProgress(req: Request, res: Response): Promi
     });
   } catch (err: any) {
     error(res, err.message || '获取交易进度失败');
+  }
+}
+
+export async function getFunnelDetail(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以查看漏斗明细');
+      return;
+    }
+
+    const { dimension } = req.params;
+    const industry = req.query.industry as string;
+    const region = req.query.region as string;
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    const days = parseInt(req.query.days as string) || 30;
+
+    if (!['product', 'provider', 'consumerOrg'].includes(dimension)) {
+      badRequest(res, '维度参数不正确：product/provider/consumerOrg');
+      return;
+    }
+
+    const productWhere: any = {};
+    if (industry) productWhere.industry = industry;
+    if (region) productWhere.region = region;
+
+    const dateFilter: any = {};
+    if (startDate) dateFilter.gte = new Date(startDate);
+    if (endDate) dateFilter.lte = new Date(endDate);
+
+    const productsWithProvider = await prisma.dataProduct.findMany({
+      where: productWhere,
+      include: {
+        provider: { select: { id: true, fullName: true, organization: true } },
+      },
+    });
+    const productIds = productsWithProvider.map((p) => p.id);
+
+    const hasProductFilter = industry || region;
+    if (hasProductFilter && productIds.length === 0) {
+      success(res, {
+        dimension,
+        items: [],
+        totalItems: 0,
+        filters: {
+          industry: industry || null,
+          region: region || null,
+          startDate: startDate || null,
+          endDate: endDate || null,
+        },
+      });
+      return;
+    }
+
+    const authWhere: any = {};
+    if (productIds.length > 0) authWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) authWhere.createdAt = dateFilter;
+
+    const contractWhere: any = {};
+    if (productIds.length > 0) contractWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) contractWhere.createdAt = dateFilter;
+
+    const deliveryWhere: any = {};
+    if (productIds.length > 0) deliveryWhere.productId = { in: productIds };
+    if (Object.keys(dateFilter).length > 0) deliveryWhere.createdAt = dateFilter;
+
+    let items: any[] = [];
+
+    if (dimension === 'product') {
+      const [authByProduct, contractByProduct, deliveryByProduct, confirmedByProduct] = await Promise.all([
+        prisma.authorizationRequest.groupBy({
+          by: ['productId'],
+          where: authWhere,
+          _count: { id: true },
+        }),
+        prisma.contract.groupBy({
+          by: ['productId'],
+          where: contractWhere,
+          _count: { id: true },
+        }),
+        prisma.deliveryRecord.groupBy({
+          by: ['productId'],
+          where: deliveryWhere,
+          _count: { id: true },
+        }),
+        prisma.deliveryRecord.groupBy({
+          by: ['productId'],
+          where: { ...deliveryWhere, status: DeliveryStatus.CONFIRMED },
+          _count: { id: true },
+        }),
+      ]);
+
+      const authMap = new Map<string, number>();
+      const contractMap = new Map<string, number>();
+      const deliveryMap = new Map<string, number>();
+      const confirmedMap = new Map<string, number>();
+      authByProduct.forEach((a: any) => authMap.set(a.productId, a._count.id));
+      contractByProduct.forEach((c: any) => contractMap.set(c.productId, c._count.id));
+      deliveryByProduct.forEach((d: any) => deliveryMap.set(d.productId, d._count.id));
+      confirmedByProduct.forEach((d: any) => confirmedMap.set(d.productId, d._count.id));
+
+      items = productsWithProvider.map((p) => {
+        const authCount = authMap.get(p.id) || 0;
+        const contractCount = contractMap.get(p.id) || 0;
+        const deliveryCount = deliveryMap.get(p.id) || 0;
+        const confirmedCount = confirmedMap.get(p.id) || 0;
+        return {
+          key: p.id,
+          name: p.title,
+          category: p.category,
+          industry: p.industry,
+          region: p.region,
+          stages: {
+            authRequest: authCount,
+            contract: contractCount,
+            delivery: deliveryCount,
+            confirmation: confirmedCount,
+          },
+          conversionRates: {
+            authToContract: authCount > 0 ? ((contractCount / authCount) * 100).toFixed(1) + '%' : '0%',
+            contractToDelivery: contractCount > 0 ? ((deliveryCount / contractCount) * 100).toFixed(1) + '%' : '0%',
+            deliveryConfirm: deliveryCount > 0 ? ((confirmedCount / deliveryCount) * 100).toFixed(1) + '%' : '0%',
+            overall: authCount > 0 ? ((confirmedCount / authCount) * 100).toFixed(1) + '%' : '0%',
+          },
+        };
+      });
+    } else if (dimension === 'provider') {
+      const providerMap = new Map<string, any>();
+      for (const product of productsWithProvider) {
+        const providerId = product.providerId;
+        if (!providerMap.has(providerId)) {
+          providerMap.set(providerId, {
+            key: providerId,
+            name: product.provider?.organization || product.provider?.fullName || '未知提供方',
+            contact: product.provider?.fullName,
+            productCount: 0,
+            stages: {
+              authRequest: 0,
+              contract: 0,
+              delivery: 0,
+              confirmation: 0,
+            },
+            conversionRates: {
+              authToContract: '0%',
+              contractToDelivery: '0%',
+              deliveryConfirm: '0%',
+              overall: '0%',
+            },
+          });
+        }
+        providerMap.get(providerId).productCount++;
+      }
+
+      const productIdsByProvider = new Map<string, string[]>();
+      for (const product of productsWithProvider) {
+        if (!productIdsByProvider.has(product.providerId)) {
+          productIdsByProvider.set(product.providerId, []);
+        }
+        productIdsByProvider.get(product.providerId)!.push(product.id);
+      }
+
+      for (const [providerId, pids] of productIdsByProvider) {
+        const [authCount, contractCount, deliveryCount, confirmedCount] = await Promise.all([
+          prisma.authorizationRequest.count({
+            where: { ...authWhere, productId: { in: pids } },
+          }),
+          prisma.contract.count({
+            where: { ...contractWhere, productId: { in: pids } },
+          }),
+          prisma.deliveryRecord.count({
+            where: { ...deliveryWhere, productId: { in: pids } },
+          }),
+          prisma.deliveryRecord.count({
+            where: { ...deliveryWhere, productId: { in: pids }, status: DeliveryStatus.CONFIRMED },
+          }),
+        ]);
+        const item = providerMap.get(providerId);
+        item.stages.authRequest = authCount;
+        item.stages.contract = contractCount;
+        item.stages.delivery = deliveryCount;
+        item.stages.confirmation = confirmedCount;
+        item.conversionRates = {
+          authToContract: authCount > 0 ? ((contractCount / authCount) * 100).toFixed(1) + '%' : '0%',
+          contractToDelivery: contractCount > 0 ? ((deliveryCount / contractCount) * 100).toFixed(1) + '%' : '0%',
+          deliveryConfirm: deliveryCount > 0 ? ((confirmedCount / deliveryCount) * 100).toFixed(1) + '%' : '0%',
+          overall: authCount > 0 ? ((confirmedCount / authCount) * 100).toFixed(1) + '%' : '0%',
+        };
+      }
+
+      items = Array.from(providerMap.values());
+    } else if (dimension === 'consumerOrg') {
+      const consumerWhere: any = {};
+      if (Object.keys(dateFilter).length > 0) consumerWhere.createdAt = dateFilter;
+      if (productIds.length > 0) consumerWhere.productId = { in: productIds };
+
+      const consumers = await prisma.user.findMany({
+        where: { role: UserRole.CONSUMER },
+        select: { id: true, fullName: true, organization: true },
+      });
+      const consumerMap = new Map(consumers.map((c) => [c.id, c]));
+
+      const orgsMap = new Map<string, any>();
+      const [authByConsumer, contractByConsumer, deliveryByConsumer, confirmedByConsumer] = await Promise.all([
+        prisma.authorizationRequest.groupBy({
+          by: ['consumerId'],
+          where: consumerWhere,
+          _count: { id: true },
+        }),
+        prisma.contract.groupBy({
+          by: ['consumerId'],
+          where: consumerWhere,
+          _count: { id: true },
+        }),
+        prisma.deliveryRecord.groupBy({
+          by: ['consumerId'],
+          where: deliveryWhere,
+          _count: { id: true },
+        }),
+        prisma.deliveryRecord.groupBy({
+          by: ['consumerId'],
+          where: { ...deliveryWhere, status: DeliveryStatus.CONFIRMED },
+          _count: { id: true },
+        }),
+      ]);
+
+      for (const a of authByConsumer) {
+        const consumer = consumerMap.get(a.consumerId);
+        const org = consumer?.organization || '未知机构';
+        if (!orgsMap.has(org)) {
+          orgsMap.set(org, {
+            key: org,
+            name: org,
+            consumerCount: 0,
+            authRequest: 0,
+            contract: 0,
+            delivery: 0,
+            confirmation: 0,
+          });
+        }
+        orgsMap.get(org).authRequest += a._count.id;
+      }
+      for (const c of contractByConsumer) {
+        const consumer = consumerMap.get(c.consumerId);
+        const org = consumer?.organization || '未知机构';
+        if (!orgsMap.has(org)) {
+          orgsMap.set(org, {
+            key: org,
+            name: org,
+            consumerCount: 0,
+            authRequest: 0,
+            contract: 0,
+            delivery: 0,
+            confirmation: 0,
+          });
+        }
+        orgsMap.get(org).contract += c._count.id;
+      }
+      for (const d of deliveryByConsumer) {
+        const consumer = consumerMap.get(d.consumerId);
+        const org = consumer?.organization || '未知机构';
+        if (!orgsMap.has(org)) {
+          orgsMap.set(org, {
+            key: org,
+            name: org,
+            consumerCount: 0,
+            authRequest: 0,
+            contract: 0,
+            delivery: 0,
+            confirmation: 0,
+          });
+        }
+        orgsMap.get(org).delivery += d._count.id;
+      }
+      for (const d of confirmedByConsumer) {
+        const consumer = consumerMap.get(d.consumerId);
+        const org = consumer?.organization || '未知机构';
+        if (!orgsMap.has(org)) {
+          orgsMap.set(org, {
+            key: org,
+            name: org,
+            consumerCount: 0,
+            authRequest: 0,
+            contract: 0,
+            delivery: 0,
+            confirmation: 0,
+          });
+        }
+        orgsMap.get(org).confirmation += d._count.id;
+      }
+
+      for (const item of orgsMap.values()) {
+        item.stages = {
+          authRequest: item.authRequest,
+          contract: item.contract,
+          delivery: item.delivery,
+          confirmation: item.confirmation,
+        };
+        const authCount = item.authRequest;
+        const contractCount = item.contract;
+        const deliveryCount = item.delivery;
+        const confirmedCount = item.confirmation;
+        item.conversionRates = {
+          authToContract: authCount > 0 ? ((contractCount / authCount) * 100).toFixed(1) + '%' : '0%',
+          contractToDelivery: contractCount > 0 ? ((deliveryCount / contractCount) * 100).toFixed(1) + '%' : '0%',
+          deliveryConfirm: deliveryCount > 0 ? ((confirmedCount / deliveryCount) * 100).toFixed(1) + '%' : '0%',
+          overall: authCount > 0 ? ((confirmedCount / authCount) * 100).toFixed(1) + '%' : '0%',
+        };
+      }
+
+      items = Array.from(orgsMap.values());
+    }
+
+    items.sort((a, b) => b.stages.authRequest - a.stages.authRequest);
+
+    success(res, {
+      dimension,
+      items,
+      totalItems: items.length,
+      filters: {
+        industry: industry || null,
+        region: region || null,
+        startDate: startDate || null,
+        endDate: endDate || null,
+      },
+    });
+  } catch (err: any) {
+    error(res, err.message || '获取漏斗明细失败');
   }
 }

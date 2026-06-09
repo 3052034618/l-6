@@ -349,6 +349,59 @@ export async function markDelivered(req: Request, res: Response): Promise<void> 
   }
 }
 
+export async function markDeliveryFailed(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user) {
+      unauthorized(res);
+      return;
+    }
+
+    const { id } = req.params;
+    const { failureReason } = req.body;
+
+    const delivery = await prisma.deliveryRecord.findUnique({
+      where: { id },
+      include: { product: true },
+    });
+
+    if (!delivery) {
+      notFound(res, '交付记录不存在');
+      return;
+    }
+
+    if (
+      req.user.role !== UserRole.ADMIN &&
+      req.user.userId !== delivery.product.providerId
+    ) {
+      forbidden(res, '您没有权限操作此交付');
+      return;
+    }
+
+    if (delivery.status !== DeliveryStatus.IN_PROGRESS && delivery.status !== DeliveryStatus.PENDING) {
+      badRequest(res, '当前状态不允许标记失败');
+      return;
+    }
+
+    if (!failureReason || failureReason.trim() === '') {
+      badRequest(res, '请填写失败原因');
+      return;
+    }
+
+    const updatedDelivery = await prisma.deliveryRecord.update({
+      where: { id },
+      data: {
+        status: DeliveryStatus.FAILED,
+        failureReason,
+        failedAt: new Date(),
+      },
+    });
+
+    success(res, updatedDelivery, '已标记为交付失败');
+  } catch (err: any) {
+    error(res, err.message || '操作失败');
+  }
+}
+
 export async function getDeliveryProof(req: Request, res: Response): Promise<void> {
   try {
     if (!req.user) {

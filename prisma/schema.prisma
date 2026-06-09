@@ -124,21 +124,23 @@ model Contract {
 }
 
 model DeliveryRecord {
-  id           String   @id @default(uuid())
-  contractId   String
-  productId    String
-  consumerId   String
-  batchNo      String
-  status       String   @default("PENDING")
-  dataSize     String?
-  deliveryUrl  String?
-  deliveryNote String?
-  deliveredAt  DateTime?
-  confirmedAt  DateTime?
-  proofHash    String?
-  proofData    String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String   @id @default(uuid())
+  contractId    String
+  productId     String
+  consumerId    String
+  batchNo       String
+  status        String   @default("PENDING")
+  dataSize      String?
+  deliveryUrl   String?
+  deliveryNote  String?
+  deliveredAt   DateTime?
+  confirmedAt   DateTime?
+  failureReason String?
+  failedAt      DateTime?
+  proofHash     String?
+  proofData     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   contract Contract    @relation(fields: [contractId], references: [id])
   product  DataProduct @relation(fields: [productId], references: [id])

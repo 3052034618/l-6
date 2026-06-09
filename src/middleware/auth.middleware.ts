@@ -29,6 +29,25 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   }
 }
 
+export function optionalAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    next();
+    return;
+  }
+
+  try {
+    const token = authHeader.split(' ')[1];
+    const payload = verifyToken(token);
+    req.user = payload;
+  } catch (err) {
+    // token 无效也继续，按未登录处理
+  }
+
+  next();
+}
+
 export function requireRole(...roles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
