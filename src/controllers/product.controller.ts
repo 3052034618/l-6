@@ -26,6 +26,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
     const minPrice = req.query.minPrice as string;
     const maxPrice = req.query.maxPrice as string;
 
+    const isConsumer = req.user?.role === UserRole.CONSUMER;
     const visibilityWhere = buildProductVisibilityWhere(req.user);
     const where: any = {
       ...visibilityWhere,
@@ -54,44 +55,76 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
     if (minPrice) where.price = { ...where.price, gte: parseFloat(minPrice) };
     if (maxPrice) where.price = { ...where.price, lte: parseFloat(maxPrice) };
 
-    const skip = (page - 1) * pageSize;
-
-    const [products, total] = await Promise.all([
-      prisma.dataProduct.findMany({
-        where,
-        skip,
-        take: pageSize,
-        orderBy: { [sortBy]: sortOrder },
+    const select = {
+      id: true,
+      title: true,
+      description: true,
+      category: true,
+      industry: true,
+      region: true,
+      updateFrequency: true,
+      dataVolume: true,
+      dataFormat: true,
+      pricingModel: true,
+      price: true,
+      priceUnit: true,
+      tags: true,
+      ratingAvg: true,
+      reviewCount: true,
+      viewCount: true,
+      isPublic: true,
+      visibleTo: true,
+      status: true,
+      providerId: true,
+      provider: {
         select: {
           id: true,
-          title: true,
-          description: true,
-          category: true,
-          industry: true,
-          region: true,
-          updateFrequency: true,
-          dataVolume: true,
-          dataFormat: true,
-          pricingModel: true,
-          price: true,
-          priceUnit: true,
-          tags: true,
-          ratingAvg: true,
-          reviewCount: true,
-          viewCount: true,
-          provider: {
-            select: {
-              id: true,
-              fullName: true,
-              organization: true,
-            },
-          },
-          publishedAt: true,
-          createdAt: true,
+          fullName: true,
+          organization: true,
         },
-      }),
-      prisma.dataProduct.count({ where }),
-    ]);
+      },
+      publishedAt: true,
+      createdAt: true,
+    };
+
+    let products: any[] = [];
+    let total = 0;
+
+    if (isConsumer) {
+      const allProducts = await prisma.dataProduct.findMany({
+        where,
+        orderBy: { [sortBy]: sortOrder },
+        select,
+      });
+
+      const filteredProducts = allProducts.filter((p: any) =>
+        isProductVisible({
+          user: req.user,
+          status: p.status,
+          isPublic: p.isPublic,
+          visibleTo: p.visibleTo,
+          providerId: p.providerId,
+        })
+      );
+
+      total = filteredProducts.length;
+      const skip = (page - 1) * pageSize;
+      products = filteredProducts.slice(skip, skip + pageSize);
+    } else {
+      const skip = (page - 1) * pageSize;
+      const [foundProducts, foundTotal] = await Promise.all([
+        prisma.dataProduct.findMany({
+          where,
+          skip,
+          take: pageSize,
+          orderBy: { [sortBy]: sortOrder },
+          select,
+        }),
+        prisma.dataProduct.count({ where }),
+      ]);
+      products = foundProducts;
+      total = foundTotal;
+    }
 
     successWithPagination(res, products, total, page, pageSize);
   } catch (err: any) {
@@ -612,7 +645,7 @@ export async function setProductVisibility(req: Request, res: Response): Promise
     }
 
     const { id } = req.params;
-    const { isPublic, visibleTo } = req.body;
+    const { isPublic, visibleTo, remark } = req.body;
 
     const product = await prisma.dataProduct.findUnique({
       where: { id },
@@ -623,11 +656,28 @@ export async function setProductVisibility(req: Request, res: Response): Promise
       return;
     }
 
+    const newIsPublic = isPublic !== undefined ? isPublic : product.isPublic;
+    const newVisibleTo = visibleTo !== undefined ? (Array.isArray(visibleTo) ? JSON.stringify(visibleTo) : visibleTo) : product.visibleTo;
+
     const updatedProduct = await prisma.dataProduct.update({
       where: { id },
       data: {
-        isPublic: isPublic !== undefined ? isPublic : product.isPublic,
-        visibleTo: visibleTo || product.visibleTo,
+        isPublic: newIsPublic,
+        visibleTo: newVisibleTo,
+      },
+    });
+
+    await prisma.visibilityChangeLog.create({
+      data: {
+        productId: id,
+        oldIsPublic: product.isPublic,
+        newIsPublic: newIsPublic,
+        oldVisibleTo: product.visibleTo,
+        newVisibleTo: newVisibleTo,
+        mode: 'custom',
+        operatorId: req.user.userId,
+        operatorName: req.user.fullName || req.user.username,
+        remark,
       },
     });
 
@@ -739,7 +789,7 @@ export async function batchSetVisibility(req: Request, res: Response): Promise<v
       return;
     }
 
-    const { productIds, isPublic, visibleTo, mode } = req.body;
+    const { productIds, isPublic, visibleTo, mode, remark } = req.body;
 
     if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
       badRequest(res, '产品ID列表不能为空');
@@ -784,8 +834,27 @@ export async function batchSetVisibility(req: Request, res: Response): Promise<v
       data: updateData,
     });
 
+    const batchId = `VC${Date.now()}${Math.floor(Math.random() * 10000)}`;
+    const logData = products.map((p) => ({
+      batchId,
+      productId: p.id,
+      oldIsPublic: p.isPublic,
+      newIsPublic: updateData.isPublic !== undefined ? updateData.isPublic : p.isPublic,
+      oldVisibleTo: p.visibleTo,
+      newVisibleTo: updateData.visibleTo !== undefined ? updateData.visibleTo : p.visibleTo,
+      mode,
+      operatorId: req.user!.userId,
+      operatorName: req.user!.fullName || req.user!.username,
+      remark,
+    }));
+
+    await prisma.visibilityChangeLog.createMany({
+      data: logData,
+    });
+
     success(res, {
       updatedCount: result.count,
+      batchId,
       productIds: productIds,
       mode,
       isPublic: updateData.isPublic,
@@ -793,5 +862,62 @@ export async function batchSetVisibility(req: Request, res: Response): Promise<v
     }, '批量配置可见范围成功');
   } catch (err: any) {
     error(res, err.message || '批量配置可见范围失败');
+  }
+}
+
+export async function getVisibilityChangeLogs(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以查看可见范围变更记录');
+      return;
+    }
+
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.pageSize as string) || 20;
+    const productId = req.query.productId as string;
+    const batchId = req.query.batchId as string;
+    const operatorId = req.query.operatorId as string;
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+
+    const where: any = {};
+    if (productId) where.productId = productId;
+    if (batchId) where.batchId = batchId;
+    if (operatorId) where.operatorId = operatorId;
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) where.createdAt.gte = new Date(startDate);
+      if (endDate) where.createdAt.lte = new Date(endDate);
+    }
+
+    const skip = (page - 1) * pageSize;
+
+    const [logs, total] = await Promise.all([
+      prisma.visibilityChangeLog.findMany({
+        where,
+        skip,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          product: {
+            select: {
+              id: true,
+              title: true,
+            },
+          },
+        },
+      }),
+      prisma.visibilityChangeLog.count({ where }),
+    ]);
+
+    const formattedLogs = logs.map((log: any) => ({
+      ...log,
+      oldVisibleTo: log.oldVisibleTo ? parseVisibleTo(log.oldVisibleTo) : [],
+      newVisibleTo: log.newVisibleTo ? parseVisibleTo(log.newVisibleTo) : [],
+    }));
+
+    successWithPagination(res, formattedLogs, total, page, pageSize);
+  } catch (err: any) {
+    error(res, err.message || '获取可见范围变更记录失败');
   }
 }

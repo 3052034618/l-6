@@ -65,6 +65,7 @@ model DataProduct {
   deliveryRecords    DeliveryRecord[]
   reviews            Review[]
   auditLogs          ProductAuditLog[]
+  visibilityLogs     VisibilityChangeLog[]
   reports            Report[]
 
   @@index([status])
@@ -137,6 +138,10 @@ model DeliveryRecord {
   confirmedAt   DateTime?
   failureReason String?
   failedAt      DateTime?
+  reviewStatus  String?
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  reviewNote    String?
   proofHash     String?
   proofData     String?
   createdAt     DateTime @default(now())
@@ -219,6 +224,27 @@ model ProductAuditLog {
   product DataProduct @relation(fields: [productId], references: [id])
 
   @@index([productId])
+}
+
+model VisibilityChangeLog {
+  id            String   @id @default(uuid())
+  batchId       String?
+  productId     String
+  oldIsPublic   Boolean
+  newIsPublic   Boolean
+  oldVisibleTo  String?
+  newVisibleTo  String?
+  mode          String
+  operatorId    String
+  operatorName  String
+  remark        String?
+  createdAt     DateTime @default(now())
+
+  product DataProduct @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+  @@index([batchId])
+  @@index([createdAt])
 }
 
 model ProductViewLog {

@@ -962,3 +962,367 @@ export async function getFunnelDetail(req: Request, res: Response): Promise<void
     error(res, err.message || '获取漏斗明细失败');
   }
 }
+
+const DEFAULT_TIMEOUT_DAYS = {
+  authPending: 3,
+  contractToDelivery: 7,
+  deliveryToConfirm: 5,
+};
+
+export async function getTimeoutOrders(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以查看超时卡单统计');
+      return;
+    }
+
+    const dimension = req.params.dimension || 'product';
+    const industry = req.query.industry as string;
+    const region = req.query.region as string;
+    const providerId = req.query.providerId as string;
+    const authTimeoutDays = parseInt(req.query.authTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.authPending;
+    const contractTimeoutDays = parseInt(req.query.contractTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.contractToDelivery;
+    const deliveryTimeoutDays = parseInt(req.query.deliveryTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.deliveryToConfirm;
+
+    if (dimension !== 'product' && dimension !== 'provider' && dimension !== 'consumerOrg') {
+      badRequest(res, '维度参数不正确：product/provider/consumerOrg');
+      return;
+    }
+
+    const productWhere: any = {};
+    if (industry) productWhere.industry = industry;
+    if (region) productWhere.region = region;
+
+    const products = await prisma.dataProduct.findMany({
+      where: productWhere,
+      select: { id: true, title: true, industry: true, region: true, providerId: true },
+    });
+
+    if (products.length === 0 && (industry || region)) {
+      success(res, {
+        dimension,
+        items: [],
+        totalItems: 0,
+        timeoutThresholds: {
+          authPending: authTimeoutDays,
+          contractToDelivery: contractTimeoutDays,
+          deliveryToConfirm: deliveryTimeoutDays,
+        },
+      });
+      return;
+    }
+
+    const productIds = products.map((p) => p.id);
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
+    const now = new Date();
+    const authThreshold = new Date(now.getTime() - authTimeoutDays * 24 * 60 * 60 * 1000);
+    const contractThreshold = new Date(now.getTime() - contractTimeoutDays * 24 * 60 * 60 * 1000);
+    const deliveryThreshold = new Date(now.getTime() - deliveryTimeoutDays * 24 * 60 * 60 * 1000);
+
+    const [pendingAuths, signedContracts, deliveredDeliveries] = await Promise.all([
+      prisma.authorizationRequest.findMany({
+        where: {
+          productId: { in: productIds },
+          status: AuthorizationStatus.PENDING,
+          createdAt: { lte: authThreshold },
+          ...(providerId ? { product: { providerId } } : {}),
+        },
+        include: {
+          product: { select: { id: true, title: true, providerId: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+        },
+      }),
+      prisma.contract.findMany({
+        where: {
+          productId: { in: productIds },
+          status: { in: [ContractStatus.SIGNED, ContractStatus.EXECUTING] },
+          signedAt: { lte: contractThreshold },
+          ...(providerId ? { product: { providerId } } : {}),
+        },
+        include: {
+          product: { select: { id: true, title: true, providerId: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+          deliveryRecords: { select: { id: true, status: true } },
+        },
+      }),
+      prisma.deliveryRecord.findMany({
+        where: {
+          productId: { in: productIds },
+          status: DeliveryStatus.DELIVERED,
+          deliveredAt: { lte: deliveryThreshold },
+          ...(providerId ? { product: { providerId } } : {}),
+        },
+        include: {
+          product: { select: { id: true, title: true, providerId: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+          contract: { select: { id: true, contractNo: true } },
+        },
+      }),
+    ]);
+
+    const contractsWithoutDelivery = signedContracts.filter(
+      (c: any) => !c.deliveryRecords.some((d: any) => d.status === DeliveryStatus.DELIVERED || d.status === DeliveryStatus.CONFIRMED)
+    );
+
+    const itemsMap = new Map<string, any>();
+
+    function getKey(item: any): string {
+      if (dimension === 'product') {
+        return item.product.id;
+      } else if (dimension === 'provider') {
+        return item.product.providerId;
+      } else {
+        return item.consumer.organization;
+      }
+    }
+
+    function getItem(item: any): any {
+      const key = getKey(item);
+      if (!itemsMap.has(key)) {
+        if (dimension === 'product') {
+          itemsMap.set(key, {
+            id: item.product.id,
+            name: item.product.title,
+            industry: productMap.get(item.product.id)?.industry,
+            region: productMap.get(item.product.id)?.region,
+            timeoutCounts: { authPending: 0, contractToDelivery: 0, deliveryToConfirm: 0 },
+            timeoutOrders: { authPending: [], contractToDelivery: [], deliveryToConfirm: [] },
+          });
+        } else if (dimension === 'provider') {
+          itemsMap.set(key, {
+            id: item.product.provider.id,
+            name: item.product.provider.organization,
+            contact: item.product.provider.fullName,
+            timeoutCounts: { authPending: 0, contractToDelivery: 0, deliveryToConfirm: 0 },
+            timeoutOrders: { authPending: [], contractToDelivery: [], deliveryToConfirm: [] },
+          });
+        } else {
+          itemsMap.set(key, {
+            orgName: item.consumer.organization,
+            contact: item.consumer.fullName,
+            timeoutCounts: { authPending: 0, contractToDelivery: 0, deliveryToConfirm: 0 },
+            timeoutOrders: { authPending: [], contractToDelivery: [], deliveryToConfirm: [] },
+          });
+        }
+      }
+      return itemsMap.get(key);
+    }
+
+    pendingAuths.forEach((auth: any) => {
+      const entry = getItem(auth);
+      entry.timeoutCounts.authPending++;
+      entry.timeoutOrders.authPending.push({
+        id: auth.id,
+        type: 'auth',
+        productId: auth.product.id,
+        productTitle: auth.product.title,
+        consumerOrg: auth.consumer.organization,
+        consumerName: auth.consumer.fullName,
+        createdAt: auth.createdAt,
+        daysStuck: Math.floor((now.getTime() - new Date(auth.createdAt).getTime()) / (24 * 60 * 60 * 1000)),
+      });
+    });
+
+    contractsWithoutDelivery.forEach((contract: any) => {
+      const entry = getItem(contract);
+      entry.timeoutCounts.contractToDelivery++;
+      entry.timeoutOrders.contractToDelivery.push({
+        id: contract.id,
+        type: 'contract',
+        contractNo: contract.contractNo,
+        productId: contract.product.id,
+        productTitle: contract.product.title,
+        consumerOrg: contract.consumer.organization,
+        consumerName: contract.consumer.fullName,
+        signedAt: contract.signedAt,
+        daysStuck: Math.floor((now.getTime() - new Date(contract.signedAt).getTime()) / (24 * 60 * 60 * 1000)),
+      });
+    });
+
+    deliveredDeliveries.forEach((delivery: any) => {
+      const entry = getItem(delivery);
+      entry.timeoutCounts.deliveryToConfirm++;
+      entry.timeoutOrders.deliveryToConfirm.push({
+        id: delivery.id,
+        type: 'delivery',
+        batchNo: delivery.batchNo,
+        contractId: delivery.contract?.id,
+        contractNo: delivery.contract?.contractNo,
+        productId: delivery.product.id,
+        productTitle: delivery.product.title,
+        consumerOrg: delivery.consumer.organization,
+        consumerName: delivery.consumer.fullName,
+        deliveredAt: delivery.deliveredAt,
+        daysStuck: Math.floor((now.getTime() - new Date(delivery.deliveredAt).getTime()) / (24 * 60 * 60 * 1000)),
+      });
+    });
+
+    const items = Array.from(itemsMap.values());
+    items.sort((a, b) => {
+      const aTotal = a.timeoutCounts.authPending + a.timeoutCounts.contractToDelivery + a.timeoutCounts.deliveryToConfirm;
+      const bTotal = b.timeoutCounts.authPending + b.timeoutCounts.contractToDelivery + b.timeoutCounts.deliveryToConfirm;
+      return bTotal - aTotal;
+    });
+
+    success(res, {
+      dimension,
+      items,
+      totalItems: items.length,
+      totalTimeoutOrders: {
+        authPending: pendingAuths.length,
+        contractToDelivery: contractsWithoutDelivery.length,
+        deliveryToConfirm: deliveredDeliveries.length,
+        total: pendingAuths.length + contractsWithoutDelivery.length + deliveredDeliveries.length,
+      },
+      timeoutThresholds: {
+        authPending: authTimeoutDays,
+        contractToDelivery: contractTimeoutDays,
+        deliveryToConfirm: deliveryTimeoutDays,
+      },
+    });
+  } catch (err: any) {
+    error(res, err.message || '获取超时卡单统计失败');
+  }
+}
+
+export async function exportTimeoutOrdersByProvider(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以导出超时卡单');
+      return;
+    }
+
+    const authTimeoutDays = parseInt(req.query.authTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.authPending;
+    const contractTimeoutDays = parseInt(req.query.contractTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.contractToDelivery;
+    const deliveryTimeoutDays = parseInt(req.query.deliveryTimeoutDays as string) || DEFAULT_TIMEOUT_DAYS.deliveryToConfirm;
+
+    const now = new Date();
+    const authThreshold = new Date(now.getTime() - authTimeoutDays * 24 * 60 * 60 * 1000);
+    const contractThreshold = new Date(now.getTime() - contractTimeoutDays * 24 * 60 * 60 * 1000);
+    const deliveryThreshold = new Date(now.getTime() - deliveryTimeoutDays * 24 * 60 * 60 * 1000);
+
+    const [pendingAuths, signedContracts, deliveredDeliveries] = await Promise.all([
+      prisma.authorizationRequest.findMany({
+        where: {
+          status: AuthorizationStatus.PENDING,
+          createdAt: { lte: authThreshold },
+        },
+        include: {
+          product: { select: { id: true, title: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+        },
+      }),
+      prisma.contract.findMany({
+        where: {
+          status: { in: [ContractStatus.SIGNED, ContractStatus.EXECUTING] },
+          signedAt: { lte: contractThreshold },
+        },
+        include: {
+          product: { select: { id: true, title: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+          deliveryRecords: { select: { id: true, status: true } },
+        },
+      }),
+      prisma.deliveryRecord.findMany({
+        where: {
+          status: DeliveryStatus.DELIVERED,
+          deliveredAt: { lte: deliveryThreshold },
+        },
+        include: {
+          product: { select: { id: true, title: true, provider: { select: { id: true, fullName: true, organization: true } } } },
+          consumer: { select: { id: true, fullName: true, organization: true } },
+        },
+      }),
+    ]);
+
+    const contractsWithoutDelivery = signedContracts.filter(
+      (c: any) => !c.deliveryRecords.some((d: any) => d.status === DeliveryStatus.DELIVERED || d.status === DeliveryStatus.CONFIRMED)
+    );
+
+    const providerMap = new Map<string, any>();
+
+    function getProvider(item: any) {
+      const providerId = item.product.provider.id;
+      if (!providerMap.has(providerId)) {
+        providerMap.set(providerId, {
+          providerId,
+          providerName: item.product.provider.organization,
+          contact: item.product.provider.fullName,
+          authPending: 0,
+          contractToDelivery: 0,
+          deliveryToConfirm: 0,
+          total: 0,
+          details: [],
+        });
+      }
+      return providerMap.get(providerId);
+    }
+
+    pendingAuths.forEach((auth: any) => {
+      const p = getProvider(auth);
+      p.authPending++;
+      p.total++;
+      p.details.push({
+        超时类型: '授权待审',
+        关联ID: auth.id,
+        产品名称: auth.product.title,
+        使用方机构: auth.consumer.organization,
+        使用方联系人: auth.consumer.fullName,
+        滞留天数: Math.floor((now.getTime() - new Date(auth.createdAt).getTime()) / (24 * 60 * 60 * 1000)),
+        创建时间: new Date(auth.createdAt).toLocaleString('zh-CN'),
+      });
+    });
+
+    contractsWithoutDelivery.forEach((contract: any) => {
+      const p = getProvider(contract);
+      p.contractToDelivery++;
+      p.total++;
+      p.details.push({
+        超时类型: '合同待交付',
+        关联ID: contract.contractNo || contract.id,
+        产品名称: contract.product.title,
+        使用方机构: contract.consumer.organization,
+        使用方联系人: contract.consumer.fullName,
+        滞留天数: Math.floor((now.getTime() - new Date(contract.signedAt).getTime()) / (24 * 60 * 60 * 1000)),
+        创建时间: new Date(contract.signedAt).toLocaleString('zh-CN'),
+      });
+    });
+
+    deliveredDeliveries.forEach((delivery: any) => {
+      const p = getProvider(delivery);
+      p.deliveryToConfirm++;
+      p.total++;
+      p.details.push({
+        超时类型: '交付待确认',
+        关联ID: delivery.batchNo || delivery.id,
+        产品名称: delivery.product.title,
+        使用方机构: delivery.consumer.organization,
+        使用方联系人: delivery.consumer.fullName,
+        滞留天数: Math.floor((now.getTime() - new Date(delivery.deliveredAt).getTime()) / (24 * 60 * 60 * 1000)),
+        创建时间: new Date(delivery.deliveredAt).toLocaleString('zh-CN'),
+      });
+    });
+
+    const providerList = Array.from(providerMap.values()).sort((a, b) => b.total - a.total);
+
+    const header = ['提供方ID', '提供方名称', '联系人', '授权待审数', '合同待交付数', '交付待确认数', '超时总数'];
+    const rows = providerList.map((p) => [
+      p.providerId,
+      p.providerName,
+      p.contact,
+      p.authPending.toString(),
+      p.contractToDelivery.toString(),
+      p.deliveryToConfirm.toString(),
+      p.total.toString(),
+    ]);
+
+    const csvContent = [header, ...rows].map((row) => row.join(',')).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="timeout_orders_provider_${Date.now()}.csv"`);
+    res.send('\uFEFF' + csvContent);
+  } catch (err: any) {
+    error(res, err.message || '导出超时卡单失败');
+  }
+}

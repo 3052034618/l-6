@@ -393,12 +393,76 @@ export async function markDeliveryFailed(req: Request, res: Response): Promise<v
         status: DeliveryStatus.FAILED,
         failureReason,
         failedAt: new Date(),
+        reviewStatus: 'PENDING',
+        reviewedBy: null,
+        reviewedAt: null,
+        reviewNote: null,
       },
     });
 
-    success(res, updatedDelivery, '已标记为交付失败');
+    success(res, updatedDelivery, '已标记为交付失败，等待运营复核');
   } catch (err: any) {
     error(res, err.message || '操作失败');
+  }
+}
+
+export async function reviewDeliveryFailed(req: Request, res: Response): Promise<void> {
+  try {
+    if (!req.user || req.user.role !== UserRole.ADMIN) {
+      forbidden(res, '只有管理员可以复核交付失败');
+      return;
+    }
+
+    const { id } = req.params;
+    const { action, reviewNote } = req.body;
+
+    if (action !== 'confirm' && action !== 'reject') {
+      badRequest(res, '操作类型不正确：confirm/reject');
+      return;
+    }
+
+    const delivery = await prisma.deliveryRecord.findUnique({
+      where: { id },
+      include: { product: true },
+    });
+
+    if (!delivery) {
+      notFound(res, '交付记录不存在');
+      return;
+    }
+
+    if (delivery.status !== DeliveryStatus.FAILED) {
+      badRequest(res, '只有失败状态的交付可以复核');
+      return;
+    }
+
+    if (delivery.reviewStatus === 'APPROVED') {
+      badRequest(res, '该交付失败已确认，不可重复复核');
+      return;
+    }
+
+    let updateData: any = {
+      reviewStatus: action === 'confirm' ? 'APPROVED' : 'REJECTED',
+      reviewedBy: req.user.fullName || req.user.username,
+      reviewedAt: new Date(),
+      reviewNote: reviewNote || null,
+    };
+
+    if (action === 'reject') {
+      updateData.status = DeliveryStatus.IN_PROGRESS;
+      updateData.failureReason = null;
+      updateData.failedAt = null;
+    }
+
+    const updatedDelivery = await prisma.deliveryRecord.update({
+      where: { id },
+      data: updateData,
+    });
+
+    const message = action === 'confirm' ? '已确认交付失败' : '已驳回失败申请，恢复交付中';
+    success(res, updatedDelivery, message);
+  } catch (err: any) {
+    error(res, err.message || '复核失败');
   }
 }
 

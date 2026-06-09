@@ -16,6 +16,7 @@ import {
   getPendingReviewProducts,
   getProductCategories,
   getProductAuditLogs,
+  getVisibilityChangeLogs,
 } from '../controllers/product.controller';
 import { authMiddleware, optionalAuthMiddleware, requireAdmin, requireProvider } from '../middleware/auth.middleware';
 
@@ -25,6 +26,7 @@ router.get('/categories', getProductCategories);
 router.get('/', optionalAuthMiddleware, getProducts);
 router.get('/mine', authMiddleware, getMyProducts);
 router.get('/pending-review', authMiddleware, requireAdmin, getPendingReviewProducts);
+router.get('/visibility-logs', authMiddleware, requireAdmin, getVisibilityChangeLogs);
 router.get('/:id', optionalAuthMiddleware, getProductDetail);
 router.get('/:id/sample', optionalAuthMiddleware, getProductSample);
 router.get('/:id/audit-logs', authMiddleware, getProductAuditLogs);
