@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  email        String   @unique
+  password     String
+  fullName     String
+  role         String
+  organization String?
+  phone        String?
+  avatar       String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  dataProducts       DataProduct[]           @relation("ProviderProducts")
+  authRequests       AuthorizationRequest[]  @relation("ConsumerRequests")
+  contractsAsConsumer Contract[]             @relation("ConsumerContracts")
+  reviews            Review[]
+  reports            Report[]                @relation("Reporter")
+  deliveryRecords    DeliveryRecord[]        @relation("ConsumerDeliveries")
+}
+
+model DataProduct {
+  id              String    @id @default(uuid())
+  title           String
+  description     String
+  category        String
+  industry        String
+  region          String
+  updateFrequency String
+  dataVolume      String
+  dataFormat      String
+  sampleData      String?
+  samplePreview   String?
+  pricingModel    String
+  price           Float
+  priceUnit       String
+  providerId      String
+  status          String    @default("DRAFT")
+  isPublic        Boolean   @default(true)
+  visibleTo       String?
+  tags            String?
+  ratingAvg       Float     @default(0)
+  reviewCount     Int       @default(0)
+  viewCount       Int       @default(0)
+  downloadCount   Int       @default(0)
+  rejectReason    String?
+  frozenReason    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  publishedAt     DateTime?
+
+  provider           User                   @relation("ProviderProducts", fields: [providerId], references: [id])
+  authRequests       AuthorizationRequest[]
+  contracts          Contract[]
+  deliveryRecords    DeliveryRecord[]
+  reviews            Review[]
+  auditLogs          ProductAuditLog[]
+  reports            Report[]
+
+  @@index([status])
+  @@index([industry])
+  @@index([region])
+  @@index([category])
+  @@index([updateFrequency])
+}
+
+model AuthorizationRequest {
+  id           String   @id @default(uuid())
+  productId    String
+  consumerId   String
+  purpose      String
+  usageScope   String
+  duration     Int
+  status       String   @default("PENDING")
+  approverId   String?
+  approveNote  String?
+  approvedAt   DateTime?
+  rejectedAt   DateTime?
+  rejectReason String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  product  DataProduct @relation(fields: [productId], references: [id])
+  consumer User        @relation("ConsumerRequests", fields: [consumerId], references: [id])
+  contract Contract?
+
+  @@index([status])
+  @@index([consumerId])
+  @@index([productId])
+}
+
+model Contract {
+  id              String   @id @default(uuid())
+  contractNo      String   @unique
+  productId       String
+  consumerId      String
+  authRequestId   String?  @unique
+  status          String   @default("DRAFT")
+  price           Float
+  startDate       DateTime
+  endDate         DateTime
+  terms           String
+  signedAt        DateTime?
+  completedAt     DateTime?
+  terminatedAt    DateTime?
+  terminateReason String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  product         DataProduct      @relation(fields: [productId], references: [id])
+  consumer        User             @relation("ConsumerContracts", fields: [consumerId], references: [id])
+  authRequest     AuthorizationRequest? @relation(fields: [authRequestId], references: [id])
+  deliveryRecords DeliveryRecord[]
+}
+
+model DeliveryRecord {
+  id           String   @id @default(uuid())
+  contractId   String
+  productId    String
+  consumerId   String
+  batchNo      String
+  status       String   @default("PENDING")
+  dataSize     String?
+  deliveryUrl  String?
+  deliveryNote String?
+  deliveredAt  DateTime?
+  confirmedAt  DateTime?
+  proofHash    String?
+  proofData    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  contract Contract    @relation(fields: [contractId], references: [id])
+  product  DataProduct @relation(fields: [productId], references: [id])
+  consumer User        @relation("ConsumerDeliveries", fields: [consumerId], references: [id])
+  proof    DeliveryProof?
+
+  @@index([contractId])
+  @@index([status])
+}
+
+model DeliveryProof {
+  id           String   @id @default(uuid())
+  deliveryId   String   @unique
+  proofType    String
+  proofHash    String
+  proofContent String
+  timestamp    DateTime
+  auditor      String?
+  auditTrail   String
+  createdAt    DateTime @default(now())
+
+  delivery DeliveryRecord @relation(fields: [deliveryId], references: [id])
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  productId String
+  userId    String
+  rating    Int
+  content   String
+  reply     String?
+  repliedAt DateTime?
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  product DataProduct @relation(fields: [productId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+
+  @@index([productId])
+  @@index([userId])
+}
+
+model Report {
+  id          String   @id @default(uuid())
+  productId   String
+  reporterId  String
+  reportType  String
+  title       String
+  description String
+  evidence    String?
+  status      String   @default("PENDING")
+  handlerId   String?
+  handleNote  String?
+  handledAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product  DataProduct @relation(fields: [productId], references: [id])
+  reporter User        @relation("Reporter", fields: [reporterId], references: [id])
+
+  @@index([status])
+  @@index([productId])
+}
+
+model ProductAuditLog {
+  id        String   @id @default(uuid())
+  productId String
+  action    String
+  oldStatus String?
+  newStatus String?
+  operator  String
+  note      String?
+  createdAt DateTime @default(now())
+
+  product DataProduct @relation(fields: [productId], references: [id])
+
+  @@index([productId])
+}
+
+model ProductViewLog {
+  id        String   @id @default(uuid())
+  productId String
+  viewerId  String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+  @@index([createdAt])
+}
